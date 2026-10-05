@@ -251,6 +251,28 @@ def is_profile_repo(r: dict, login: str) -> bool:
     return r["name"].lower() == login.lower()
 
 
+def fetch_languages(g: GH, user: str, repos: list[dict]) -> tuple[dict, bool]:
+    """Linguagens agregadas do usuário, com fallback repo a repo.
+
+    O endpoint /users/{user}/languages devolve 404 para perfis com poucos repos
+    (bug conhecido da API, não é perfil vazio). Nesses casos somamos
+    /repos/{owner}/{repo}/languages, que é o mesmo cálculo que a aba
+    "Languages" do perfil faz. Retorna (langs, degradado).
+    """
+    langs = g.get(f"/users/{user}/languages", soft404=True)
+    if isinstance(langs, dict) and langs:
+        return langs, False
+
+    agg: dict[str, int] = {}
+    own = [r for r in repos if not r["fork"]]
+    for r in own[:60]:
+        rl = g.get(f"/repos/{r['owner']['login']}/{r['name']}/languages", soft404=True)
+        if isinstance(rl, dict):
+            for k, v in rl.items():
+                agg[k] = agg.get(k, 0) + v
+    return agg, bool(agg)
+
+
 # --------------------------------------------------------------------------
 # Dimensões
 # --------------------------------------------------------------------------
@@ -331,8 +353,8 @@ def score_readme(g: GH, p: dict, repos: list[dict], user: str) -> tuple[dict, li
         f.append(Finding("P0", "readme", "README de perfil vazio ou placeholder",
                          f"Só {size} chars — abaixo do que um recrutador lê.",
                          "Estrutura: badge de título, 2 linhas de posicionamento, "
-                         "stack como ícones, projetos com link, contato,Rodapé com "
-                         "o que você quer que apareça primeiro.", "20"))
+                         "stack como ícones, projetos com link, contato. "
+                         "Comece pelo que você quer que apareça primeiro.", "20"))
     if txt and "![Avatar" not in txt and "![" not in txt:
         f.append(Finding("P2", "readme", "Falta avatar/imagem no topo",
                          "O primeiro pixel decide se o leitor para.", "Adicione header.", "4"))
@@ -549,7 +571,7 @@ def main() -> int:
     g = GH(args.token)
     try:
         prof, repos = collect(g, args.user)
-        langs = g.get(f"/users/{args.user}/languages", soft404=True)
+        langs, langs_degraded = fetch_languages(g, args.user, repos)
         ev = g.get(f"/users/{args.user}/events/public?per_page=100")
     except GHError as e:
         print(f"erro: {e}", file=sys.stderr)
@@ -561,7 +583,7 @@ def main() -> int:
         ("perfil", lambda: score_profile(prof, repos)),
         ("readme", lambda: score_readme(g, prof, repos, args.user)),
         ("projetos", lambda: score_projects(repos, args.user)),
-        ("tecnologias", lambda: score_tech(langs if isinstance(langs, dict) else {}, repos)),
+        ("tecnologias", lambda: score_tech(langs, repos)),
         ("atividade", lambda: score_activity(repos, ev, args.user)),
         ("prova_social", lambda: score_social(repos, prof)),
         ("higiene", lambda: score_hygiene(g, repos, prof, args.user)),
@@ -577,7 +599,8 @@ def main() -> int:
         "followers": prof.get("followers"),
         "public_repos": prof.get("public_repos"),
         "created_at": prof.get("created_at"),
-        "linguagens": langs if isinstance(langs, dict) else {},
+        "linguagens": langs,
+        "linguagens_fallback_repo_a_repo": langs_degraded,
         "chamadas_api": g.n,
     }
 
